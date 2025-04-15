@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Planetary Alignment Simulator</title>
+  <style>
+    body { font-family: Arial; padding: 20px; }
+    .planet-group { border: 1px solid #ccc; padding: 10px; margin-bottom: 10px; }
+    input { margin: 4px; }
+    #progressBar { height: 20px; background: #eee; margin-top: 10px; }
+    #progressBar div { height: 100%; background: #76c7c0; width: 0%; transition: width 0.2s; }
+    svg { border: 1px solid #ccc; cursor: grab; user-select: none; }
+  </style>
+</head>
+<body>
+
+<h2>Planetary Alignment Simulator</h2>
+
+<div id="planetInputs"></div>
+<button onclick="addPlanetInput()">Add Planet</button>
+<button onclick="loadDefaultPlanets()">Load Default Planets</button><br><br>
+
+
+<label>Alignment Threshold (degrees): <input type="number" id="threshold" value="10" /></label><br>
+<label>Number of Alignments to Find: <input type="number" id="targetAlignments" value="5" /></label><br>
+<label>Steps Per Year (accuracy): 
+  <input type="number" id="stepsPerYear" value="10" min="1" />
+</label><br><br>
+
+<!-- Mobile zoom controls -->
+<div>
+  <button onclick="zoomView(0.625)">Zoom In</button>
+  <button onclick="zoomView(1.6)">Zoom Out</button>
+</div>
+<br>
+<br>
+<button onclick="startCalculation()">Start Calculation</button>
+<button onclick="stopCalculation()">Force Stop</button>
+
+<div id="progressText">Progress: 0 years simulated</div>
+<div id="currentYearDisplay">Current Simulation Year: 2025</div>
+<div id="progressBar"><div></div></div>
+
+<pre id="result"></pre>
+
+<svg id="orbitCanvas" width="800" height="800" viewBox="-60 -60 120 120"></svg>
+
+<script>
+let planetCount = 0;
+let stopFlag = false;
+let t = 0; // Global simulation time
+let planets = [];
+
+function zoomView(factor) {
+  const zoom = factor;
+  viewBox.x += viewBox.width * 0.5 * (1 - zoom);
+  viewBox.y += viewBox.height * 0.5 * (1 - zoom);
+  viewBox.width *= zoom;
+  viewBox.height *= zoom;
+  updateViewBox();
+}
+function addPlanetInput(name = '') {
+  const div = document.createElement('div');
+  div.className = "planet-group";
+  div.innerHTML = `
+    <strong>Planet ${planetCount + 1} ${name ? '(' + name + ')' : ''}</strong><br>
+    Name: <input type="text" id="name${planetCount}" value="${name}" /><br>
+    Semi-major axis (AU): <input type="number" step="0.01" id="a${planetCount}" /><br>
+    Eccentricity (e): <input type="number" step="0.0001" id="e${planetCount}" /><br>
+    Inclination (deg): <input type="number" step="0.01" id="i${planetCount}" /><br>
+    Longitude of Ascending Node (Ω): <input type="number" step="0.01" id="Omega${planetCount}" /><br>
+    Argument of Periapsis (ω): <input type="number" step="0.01" id="omega${planetCount}" /><br>
+    Mean Anomaly (M0): <input type="number" step="0.01" id="M0${planetCount}" /><br>
+  `;
+  document.getElementById('planetInputs').appendChild(div);
+  planetCount++;
+}
+
+function loadDefaultPlanets() {
+  const defaultPlanets = [
+    { name: 'Mercury', a: 0.387, e: 0.2056, i: 7.005, Omega: 48.331, omega: 29.124, M0: 174.796 },
+    { name: 'Venus', a: 0.723, e: 0.0068, i: 3.394, Omega: 76.680, omega: 54.884, M0: 50.115 },
+    { name: 'Earth', a: 1.000, e: 0.0167, i: 0.000, Omega: 0.000, omega: 102.937, M0: 100.464 },
+    { name: 'Mars', a: 1.524, e: 0.0934, i: 1.850, Omega: 49.558, omega: 286.502, M0: 355.453 },
+    { name: 'Jupiter', a: 5.203, e: 0.0489, i: 1.304, Omega: 100.464, omega: 273.867, M0: 34.396 },
+    { name: 'Saturn', a: 9.537, e: 0.0565, i: 2.485, Omega: 113.665, omega: 339.392, M0: 49.954 },
+    { name: 'Uranus', a: 19.191, e: 0.0472, i: 0.773, Omega: 74.006, omega: 96.998, M0: 142.238 },
+    { name: 'Neptune', a: 30.068, e: 0.0086, i: 1.770, Omega: 131.784, omega: 273.187, M0: 256.228 },
+    { name: 'Pluto', a: 39.482, e: 0.2488, i: 17.140, Omega: 110.303, omega: 113.763, M0: 14.53 }
+  ];
+  document.getElementById('planetInputs').innerHTML = '';
+  planetCount = 0;
+  defaultPlanets.forEach(p => {
+    addPlanetInput(p.name);
+    const idx = planetCount - 1;
+    document.getElementById(`a${idx}`).value = p.a;
+    document.getElementById(`e${idx}`).value = p.e;
+    document.getElementById(`i${idx}`).value = p.i;
+    document.getElementById(`Omega${idx}`).value = p.Omega;
+    document.getElementById(`omega${idx}`).value = p.omega;
+    document.getElementById(`M0${idx}`).value = p.M0;
+  });
+  drawStaticOrbits();
+}
+
+function deg2rad(d) { return d * Math.PI / 180; }
+function rad2deg(r) { return r * 180 / Math.PI; }
+
+function keplerSolve(M, e, maxIter = 100, tol = 1e-6) {
+  let E = M;
+  for (let i = 0; i < maxIter; i++) {
+    const delta = E - e * Math.sin(E) - M;
+    E -= delta / (1 - e * Math.cos(E));
+    if (Math.abs(delta) < tol) break;
+  }
+  return E;
+}
+
+function getPosition(p, t) {
+  const n = 2 * Math.PI / p.period;
+  const M = deg2rad(p.M0) + n * t;
+  const E = keplerSolve(M % (2 * Math.PI), p.e);
+  const ν = 2 * Math.atan2(Math.sqrt(1 + p.e) * Math.sin(E / 2), Math.sqrt(1 - p.e) * Math.cos(E / 2));
+  const r = p.a * (1 - p.e * Math.cos(E));
+  const angle = ν + deg2rad(p.omega);
+  return [r * Math.cos(angle), r * Math.sin(angle)];
+}
+
+function drawStaticOrbits() {
+  const svg = document.getElementById("orbitCanvas");
+  svg.innerHTML = '';
+  planets = [];
+
+  for (let i = 0; i < planetCount; i++) {
+    const a = parseFloat(document.getElementById(`a${i}`).value);
+    const e = parseFloat(document.getElementById(`e${i}`).value);
+    const name = document.getElementById(`name${i}`).value || `Planet ${i+1}`;
+    const omega = deg2rad(parseFloat(document.getElementById(`omega${i}`).value));
+    const ellipse = document.createElementNS("http://www.w3.org/2000/svg", "ellipse");
+    ellipse.setAttribute("cx", -a * e * Math.cos(omega));
+    ellipse.setAttribute("cy", -a * e * Math.sin(omega));
+    ellipse.setAttribute("rx", a);
+    ellipse.setAttribute("ry", a * Math.sqrt(1 - e ** 2));
+    ellipse.setAttribute("fill", "none");
+    ellipse.setAttribute("stroke", "#888");
+    ellipse.setAttribute("stroke-width", 0.05);
+    svg.appendChild(ellipse);
+
+    planets.push({
+      a, e,
+      M0: parseFloat(document.getElementById(`M0${i}`).value),
+      omega: parseFloat(document.getElementById(`omega${i}`).value),
+      period: Math.sqrt(a ** 3),
+      name
+    });
+
+    // Add circle element for animation
+    const body = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    body.setAttribute("r", 0.1);
+    body.setAttribute("fill", "red");
+    body.setAttribute("stroke", "none");
+    body.setAttribute("id", `planetDot${i}`);
+    svg.appendChild(body);
+  }
+
+  // Sun
+  const sun = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+  sun.setAttribute("cx", 0);
+  sun.setAttribute("cy", 0);
+  sun.setAttribute("r", 0.05);
+  sun.setAttribute("fill", "yellow");
+  svg.appendChild(sun);
+}
+
+function animateOrbits() {
+  for (let i = 0; i < planets.length; i++) {
+    const [x, y] = getPosition(planets[i], t);
+    const el = document.getElementById(`planetDot${i}`);
+    el.setAttribute("cx", x);
+    el.setAttribute("cy", y);
+  }
+}
+
+function startCalculation() {
+  stopFlag = false;
+  const threshold = parseFloat(document.getElementById('threshold').value);
+  const targetAlignments = parseInt(document.getElementById('targetAlignments').value);
+  const stepsPerYear = parseInt(document.getElementById('stepsPerYear').value);
+const step = 1 / stepsPerYear;
+  let alignmentsFound = 0;
+  const results = [];
+
+  function loop() {
+    if (stopFlag) {
+      document.getElementById('result').textContent = results.join('\n') + '\n[Stopped]';
+      return;
+    }
+
+    animateOrbits();
+
+    const pos = planets.map(p => getPosition(p, t));
+    let maxAngle = 0;
+    for (let i = 0; i < pos.length; i++) {
+      for (let j = i + 1; j < pos.length; j++) {
+        const dx1 = pos[i][0], dy1 = pos[i][1];
+        const dx2 = pos[j][0], dy2 = pos[j][1];
+        const angle = angleBetween([dx1, dy1], [dx2, dy2]);
+        if (angle > maxAngle) maxAngle = angle;
+      }
+    }
+
+    if (maxAngle <= threshold) {
+      results.push(`t = ${t.toFixed(2)} yrs | Max angle: ${maxAngle.toFixed(2)}°`);
+      alignmentsFound++;
+      t += 10;
+    } else {
+      t += step;
+    }
+document.getElementById("currentYearDisplay").textContent = `Simulated Year: ${Math.floor(2025 + t)}`;
+    document.getElementById("progressText").textContent = `Progress: ${t.toFixed(2)} years simulated`;
+    document.querySelector("#progressBar div").style.width = `${(alignmentsFound / targetAlignments) * 100}%`;
+
+    if (alignmentsFound < targetAlignments) {
+      requestAnimationFrame(loop);
+    } else {
+      document.getElementById('result').textContent = results.join('\n') + '\n[Finished]';
+    }
+  }
+
+  loop();
+}
+
+function stopCalculation() {
+  stopFlag = true;
+}
+
+function angleBetween(v1, v2) {
+  const dot = v1[0]*v2[0] + v1[1]*v2[1];
+  const mag1 = Math.hypot(v1[0], v1[1]);
+  const mag2 = Math.hypot(v2[0], v2[1]);
+  return rad2deg(Math.acos(dot / (mag1 * mag2)));
+}
+
+// SVG ZOOM & PAN
+const svg = document.getElementById('orbitCanvas');
+let viewBox = { x: -60, y: -60, width: 120, height: 120 };
+let isPanning = false;
+let startX, startY;
+
+svg.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const zoom = e.deltaY < 0 ? 0.9 : 1.1;
+  const mx = e.offsetX / svg.clientWidth;
+  const my = e.offsetY / svg.clientHeight;
+  viewBox.x += viewBox.width * mx * (1 - zoom);
+  viewBox.y += viewBox.height * my * (1 - zoom);
+  viewBox.width *= zoom;
+  viewBox.height *= zoom;
+  updateViewBox();
+});
+
+svg.addEventListener('mousedown', (e) => {
+  isPanning = true;
+  startX = e.clientX;
+  startY = e.clientY;
+});
+
+svg.addEventListener('mousemove', (e) => {
+  if (!isPanning) return;
+  const dx = (e.clientX - startX) * viewBox.width / svg.clientWidth;
+  const dy = (e.clientY - startY) * viewBox.height / svg.clientHeight;
+  viewBox.x -= dx;
+  viewBox.y -= dy;
+  startX = e.clientX;
+  startY = e.clientY;
+  updateViewBox();
+});
+
+svg.addEventListener('mouseup', () => isPanning = false);
+svg.addEventListener('mouseleave', () => isPanning = false);
+
+function updateViewBox() {
+  svg.setAttribute("viewBox", `${viewBox.x} ${viewBox.y} ${viewBox.width} ${viewBox.height}`);
+}
+</script>
+
+</body>
+</html>
